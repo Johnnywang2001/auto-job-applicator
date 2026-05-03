@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Activity, AlertTriangle } from 'lucide-react';
-import { getCounterForSite, idb, getSettings } from '../../lib/storage';
+import { Activity, AlertTriangle, X } from 'lucide-react';
+import { getCounterForSite, idb, getSettings, storage } from '../../lib/storage';
 
 export function StatusBar() {
   const [linkedinCount, setLinkedinCount] = useState(0);
   const [linkedinLimit, setLinkedinLimit] = useState(70);
-  const [antiBotAlert, setAntiBotAlert] = useState<{ site: string; detectedAt: number } | null>(null);
+  const [antiBotAlert, setAntiBotAlert] = useState<{ site: string; reason?: string; detectedAt: number } | null>(null);
   const [runningTasks, setRunningTasks] = useState(0);
 
   useEffect(() => {
@@ -14,8 +14,8 @@ export function StatusBar() {
       setLinkedinCount(counter.count);
       const settings = await getSettings();
       setLinkedinLimit(settings.linkedinDailyLimit);
-      const alert = await chrome.storage.local.get('antiBotAlert');
-      if (alert.antiBotAlert) setAntiBotAlert(alert.antiBotAlert as { site: string; detectedAt: number });
+      const alert = await storage.get<{ site: string; reason?: string; detectedAt: number }>('antiBotAlert');
+      setAntiBotAlert(alert || null);
       const tasks = await idb.getTasks();
       setRunningTasks(tasks.filter(t => t.status === 'running').length);
     };
@@ -25,14 +25,29 @@ export function StatusBar() {
     return () => clearInterval(interval);
   }, []);
 
+  const handleDismissAntiBot = async () => {
+    await storage.remove('antiBotAlert');
+    setAntiBotAlert(null);
+  };
+
   const linkedinOverLimit = linkedinCount >= linkedinLimit;
 
   return (
     <div className="h-12 bg-surface border-b border-border flex items-center px-6 gap-6 sticky top-0 z-40">
       {antiBotAlert && (
-        <div className="flex items-center gap-2 text-accent-red bg-accent-red-light px-3 py-1 rounded-md text-xs font-medium">
-          <AlertTriangle className="w-3 h-3" />
-          Anti-bot detected on {antiBotAlert.site}
+        <div
+          className="flex items-center gap-2 text-accent-red bg-accent-red-light px-3 py-1 rounded-md text-xs font-medium cursor-help"
+          title={`Reason: ${antiBotAlert.reason || 'Unknown'} • ${new Date(antiBotAlert.detectedAt).toLocaleString()}`}
+        >
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          <span>Anti-bot on {antiBotAlert.site}</span>
+          <button
+            onClick={handleDismissAntiBot}
+            className="ml-1 p-0.5 hover:bg-accent-red/20 rounded"
+            title="Dismiss alert"
+          >
+            <X className="w-3 h-3" />
+          </button>
         </div>
       )}
 

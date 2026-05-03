@@ -28,6 +28,26 @@ import { SALARY_UNKNOWN } from '../types';
     return Math.max(800, Math.round(baseDelay + jitter));
   }
 
+  // ─── VISIBILITY HELPERS ───
+
+  function isVisible(el: Element): boolean {
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return (
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      style.opacity !== '0' &&
+      rect.width > 0 &&
+      rect.height > 0
+    );
+  }
+
+  function isInsideJobCard(el: Element): boolean {
+    return !!el.closest('[data-job-id], .job-card-container, .jobs-search-results__list-item, .scaffold-layout__list-item');
+  }
+
+  // ─── AUTH WALL (NOT anti-bot) ───
+
   function detectAuthWall(): boolean {
     const bodyText = document.body.innerText.toLowerCase();
     const indicators = [
@@ -35,33 +55,151 @@ import { SALARY_UNKNOWN } from '../types';
       'join to view',
       'sign in to see',
       'join now to see',
-      'authwall',
-      'login to view'
+      'login to view',
+      'sign in to continue',
+      'join now to continue',
     ];
     return indicators.some(i => bodyText.includes(i));
   }
 
+  // ─── ANTI-BOT DETECTION v2: Multi-tier confidence ───
+
+  function reportAntiBot(reason: string) {
+    console.warn('[AJA] Anti-bot detected:', reason);
+    try {
+      chrome.runtime.sendMessage({
+        type: 'ANTI_BOT_DETECTED',
+        payload: { site: 'linkedin', reason }
+      }).catch(() => {});
+    } catch { /* extension context invalidated */ }
+    stopAutoScroll();
+  }
+
   function checkAntiBot(): boolean {
-    const indicators = [
-      'captcha',
-      'unusual activity',
-      "verify you're human",
-      'please verify',
-      'security check',
-      'authwall'
+    // ── TIER 1: Definite CAPTCHA widgets ──
+    const captchaSelectors = [
+      'iframe[src*="recaptcha"]',
+      'iframe[src*="hcaptcha"]',
+      'iframe[src*="captcha"]',
+      '.g-recaptcha',
+      '[data-sitekey]',
+      'div[class*="recaptcha"]',
+      'div[id*="captcha"]',
+      '#challenge-form',
+      '.cf-browser-verification',
+      'input[name="captcha"]',
     ];
-    const bodyText = document.body.innerText.toLowerCase();
-    for (const indicator of indicators) {
-      if (bodyText.includes(indicator)) {
-        try {
-          chrome.runtime.sendMessage({ type: 'ANTI_BOT_DETECTED', payload: { site: 'linkedin' } }).catch(() => {});
-        } catch { /* extension context invalidated */ }
-        stopAutoScroll();
+
+    for (const sel of captchaSelectors) {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) {
+        reportAntiBot('CAPTCHA widget present in DOM');
         return true;
       }
     }
+
+    // ── TIER 2: Visible overlay / modal / banner content ──
+    // Anti-bot messages appear in blocking UI, NOT in normal page content.
+    // We only scan visible overlays, modals, banners, and top-level alerts.
+    const overlaySelectors = [
+      '[role="dialog"]',
+      '[role="alert"]',
+      '[role="alertdialog"]',
+      '.artdeco-modal',
+      '.artdeco-toast-item',
+      '[class*="overlay"]',
+      '[class*="modal"]',
+      '[class*="banner"]',
+      '[class*="toast"]',
+      '[class*="challenge"]',
+      '[class*="verification"]',
+      '[class*="restriction"]',
+      '[class*="blocked"]',
+      '[class*="captcha"]',
+    ];
+
+    const visibleOverlays: Element[] = [];
+    for (const sel of overlaySelectors) {
+      document.querySelectorAll(sel).forEach(el => {
+        if (isVisible(el) && !isInsideJobCard(el)) {
+          visibleOverlays.push(el);
+        }
+      });
+    }
+
+    // Also scan the main content area's first visible child — LinkedIn puts warnings there
+    const mainContent = document.querySelector('main, [role="main"], #main-content');
+    if (mainContent) {
+      const firstVisibleChild = Array.from(mainContent.children).find(c => isVisible(c));
+      if (firstVisibleChild && !isInsideJobCard(firstVisibleChild)) {
+        visibleOverlays.push(firstVisibleChild);
+      }
+    }
+
+    const overlayTexts = visibleOverlays.map(el => el.textContent?.toLowerCase() || '');
+
+    // High-confidence regex patterns (must match in overlay text)
+    const highConfidencePatterns = [
+      /\bunusual activity\b.*\bdetected\b/,
+      /\bunusual activity\b.*\bsuspicious\b/,
+      /\bsuspicious activity\b/,
+      /\bsecurity check\b.*\bcomplete\b/,
+      /\bsecurity check\b.*\bverify\b/,
+      /\bverify you're human\b/,
+      /\bverify you are human\b/,
+      /\bplease verify\b.*\bhuman\b/,
+      /\baccount restricted\b/,
+      /\baccount temporarily restricted\b/,
+      /\btemporarily blocked\b/,
+      /\btemporarily limited\b/,
+      /\btoo many requests\b/,
+      /\brate limit\b/,
+      /\bautomated behavior\b/,
+      /\bbot detection\b/,
+      /\bprove you're not a robot\b/,
+      /\bchallenge\b.*\bsecurity\b/,
+      /\byour account has been restricted\b/,
+    ];
+
+    for (const pattern of highConfidencePatterns) {
+      for (const text of overlayTexts) {
+        if (pattern.test(text)) {
+          reportAntiBot(`High-confidence pattern: ${pattern.source}`);
+          return true;
+        }
+      }
+    }
+
+    // ── TIER 3: Multiple medium-confidence indicators in overlays ──
+    // Require at least 2 matching indicators to reduce false positives.
+    const mediumIndicators = [
+      'captcha',
+      'verify',
+      'security check',
+      'unusual activity',
+      'blocked',
+      'restricted',
+      'challenge',
+      'automated',
+      'bot',
+      'human verification',
+      'rate limit',
+    ];
+
+    for (const text of overlayTexts) {
+      const matched = mediumIndicators.filter(ind =>
+        new RegExp(`\\b${ind}\\b`).test(text)
+      );
+      if (matched.length >= 2) {
+        reportAntiBot(`Multiple indicators (${matched.length}): ${matched.join(', ')}`);
+        return true;
+      }
+    }
+
     return false;
   }
+
+  // ─── SCRAPING FUNCTIONS ───
 
   function getJobCards(): Element[] {
     const selectors = [
@@ -275,11 +413,9 @@ import { SALARY_UNKNOWN } from '../types';
 
   async function clickAndScrapeCard(card: Element): Promise<JobListing | null> {
     if (checkAntiBot()) return null;
+
+    // Auth wall = not logged in. Skip this job, but don't report anti-bot.
     if (detectAuthWall()) {
-      try {
-        chrome.runtime.sendMessage({ type: 'ANTI_BOT_DETECTED', payload: { site: 'linkedin' } }).catch(() => {});
-      } catch { /* extension context invalidated */ }
-      stopAutoScroll();
       return null;
     }
 
@@ -299,13 +435,9 @@ import { SALARY_UNKNOWN } from '../types';
       attempts++;
     }
 
-    if (detectAuthWall()) {
-      try {
-        chrome.runtime.sendMessage({ type: 'ANTI_BOT_DETECTED', payload: { site: 'linkedin' } }).catch(() => {});
-      } catch { /* extension context invalidated */ }
-      stopAutoScroll();
-      return null;
-    }
+    // Re-check after click
+    if (checkAntiBot()) return null;
+    if (detectAuthWall()) return null;
 
     const requirements = getRequirementsFromDescription(description);
     const detailSalary = getSalaryFromDetail();
@@ -489,7 +621,6 @@ import { SALARY_UNKNOWN } from '../types';
 
   observer.observe(document.body, { childList: true, subtree: true });
 
-  // Cleanup on page unload
   window.addEventListener('beforeunload', () => {
     observer.disconnect();
     if (scrollTimeoutId) clearTimeout(scrollTimeoutId);

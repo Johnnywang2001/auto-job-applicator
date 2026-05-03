@@ -1,5 +1,5 @@
 import { idb, storage } from './lib/storage';
-import { handleScraperMessage, handleScrapeProgress, handleScrapeComplete, handleCareerPageComplete, handleTabClosed, handleScrapeTimeout } from './lib/scraper-engine';
+import { handleScraperMessage, handleScrapeProgress, handleScrapeComplete, handleCareerPageComplete, handleTabClosed, handleScrapeTimeout, stopBackgroundScraping } from './lib/scraper-engine';
 import type { ScrapeTask, JobListing, LoginStatus } from './types';
 
 const LOGIN_CHECK_TIMEOUT_MS = 15000;
@@ -140,14 +140,23 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
     }
 
     case 'ANTI_BOT_DETECTED': {
-      const { site } = payload;
-      await storage.set('antiBotAlert', { site, detectedAt: Date.now() });
+      const { site, reason } = payload;
+      await storage.set('antiBotAlert', { site, reason: reason || 'Unknown', detectedAt: Date.now() });
+      // Also stop any active scrape
+      try {
+        await stopBackgroundScraping();
+      } catch { /* scraper engine may not be loaded */ }
       chrome.notifications.create({
         type: 'basic',
         iconUrl: chrome.runtime.getURL('assets/icon48.png'),
         title: 'Anti-bot Detected',
-        message: `Auto Job Applicator detected anti-bot measures on ${site}. Scraping paused.`
+        message: `Anti-bot measures detected on ${site}. Scraping paused. Reason: ${reason || 'Unknown'}`
       });
+      return { success: true };
+    }
+
+    case 'CLEAR_ANTI_BOT_ALERT': {
+      await storage.remove('antiBotAlert');
       return { success: true };
     }
 
