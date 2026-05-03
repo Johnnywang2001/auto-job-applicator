@@ -1,0 +1,7 @@
+.aja-badge {
+  display: inline-flex !important;
+  align-items: center;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
